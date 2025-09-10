@@ -3,7 +3,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Set
+from typing import Dict, Set
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
@@ -12,7 +12,7 @@ from telegram.constants import ChatMemberStatus
 
 # Настройки
 ADMIN_ID = 946695591
-BOT_TOKEN = "8456387820:AAEpFPpRPntlBV0hAmAPIRIwk5KoxLlwDnA"
+BOT_TOKEN = os.getenv('BOT_TOKEN')  # Возьми из Railway Variables
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,18 +21,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Глобальные переменные для хранения данных
+# Глобальные переменные
 chat_data = {}  # {chat_id: {"bots": set(), "manual_bots": set(), "ignored_bots": set()}}
 DATA_FILE = "bot_data.json"
 
 def load_data():
-    """Загружает данные из файла"""
     global chat_data
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Преобразуем списки обратно в множества
                 for chat_id, info in data.items():
                     chat_data[int(chat_id)] = {
                         "bots": set(info.get("bots", [])),
@@ -44,9 +42,7 @@ def load_data():
         chat_data = {}
 
 def save_data():
-    """Сохраняет данные в файл"""
     try:
-        # Преобразуем множества в списки для JSON
         data_to_save = {}
         for chat_id, info in chat_data.items():
             data_to_save[str(chat_id)] = {
@@ -54,447 +50,339 @@ def save_data():
                 "manual_bots": list(info["manual_bots"]),
                 "ignored_bots": list(info["ignored_bots"])
             }
-        
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
 
-def is_bot_by_username(user):
-    """Проверяет, является ли пользователь ботом по username"""
-    if not user or not user.username:
+def is_bot_by_username(username: str):
+    if not username:
         return False
-    
-    username = user.username.lower()
-    # Проверяем наличие "bot" в username
-    return "bot" in username
+    return username.lower().endswith('bot')
 
-def is_spam_message(message_text: str) -> bool:
-    """Простая проверка на спам без ИИ - по ключевым словам"""
-    if not message_text:
+async def is_spam_message(text: str) -> bool:
+    if not text:
         return False
-    
-    text = message_text.lower()
-    
-    # Спам-паттерны на русском и английском
+    text = text.lower()
     spam_patterns = [
-        # Реклама каналов/групп
         r'(подписыв|subscribe|join|присоедин)[^.]*(@|t\.me|telegram)',
         r'(наш\s+канал|наша\s+группа|our\s+channel|our\s+group)',
         r'(жми\s+|нажми\s+|click\s+|tap\s+).*(ссылк|link)',
-        
-        # Финансовая реклама
         r'(заработ|earn|profit|доход)[^.]*(\$|\d+|рубл|usd)',
         r'(инвест|invest|вклад|депозит)[^.]*(\%|процент|profit)',
         r'(бинарн|binary|опцион|trading|трейд)',
-        
-        # Азартные игры
         r'(казино|casino|ставк|bet|слот|slot)',
         r'(выигр|win)[^.]*(\$|\d+.*рубл|\d+.*usd)',
-        
-        # Промо-коды и скидки
         r'(промо|promo|скидк|discount|код)[^.]*(\d+|\%)',
         r'(акци|action|offer|предложени)',
-        
-        # Подозрительные ссылки
         r't\.me/[^/\s]+',
         r'@[a-zA-Z0-9_]{5,}',
-        
-        # Спам-фразы
         r'(бесплатн|free)[^.]*(\$|\d+|подарок|gift)',
         r'(только\s+сегодня|today\s+only|ограничен|limited)',
         r'(не\s+упусти|don\'t\s+miss|срочно|urgent)'
     ]
-    
-    # Подсчитываем совпадения
-    spam_score = 0
-    for pattern in spam_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            spam_score += 1
-    
-    # Дополнительная проверка на количество эмодзи и ссылок
+    spam_score = sum(1 for pattern in spam_patterns if re.search(pattern, text, re.IGNORECASE))
     emoji_count = len(re.findall(r'[^\w\s]', text))
     link_count = len(re.findall(r'(http|t\.me|@)', text))
-    
     if emoji_count > 10 or link_count > 2:
         spam_score += 1
-    
-    # Если найдено 2 или больше спам-паттернов
     return spam_score >= 2
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
     user_id = update.effective_user.id
-    
     if user_id == ADMIN_ID:
         await update.message.reply_text(
-            "🤖 Добро пожаловать в админ-панель бота!\n\n"
-            "Доступные команды:\n"
-            "/admin - Админ панель\n"
-            "/stats - Статистика\n\n"
-            "Бот автоматически удаляет рекламные сообщения от ботов (определяет по username с 'bot')."
+            "🤖 Добро пожаловать в админ-панель!\n\nКоманды:\n/admin - Панель\n/stats - Статистика\n\nБот удаляет рекламу от ботов (по username ends with 'bot')."
         )
     else:
         await update.message.reply_text(
-            "🤖 Привет! Я бот для модерации рекламы от других ботов.\n\n"
-            "Добавь меня в чат и дай права администратора для удаления сообщений.\n"
-            "Используй /botlist чтобы посмотреть список отслеживаемых ботов."
+            "🤖 Привет! Я модерирую рекламу от ботов.\n\nДобавь меня в чат, дай админ-права на удаление.\n/botlist - Список ботов."
         )
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Админ панель"""
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У вас нет прав для использования этой команды.")
+        await update.message.reply_text("❌ Нет прав.")
         return
-    
     keyboard = [
-        [InlineKeyboardButton("📊 Статистика чатов", callback_data="admin_stats")],
-        [InlineKeyboardButton("📋 Список всех чатов", callback_data="admin_chats")],
-        [InlineKeyboardButton("🔄 Обновить данные", callback_data="admin_refresh")]
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("📋 Чаты", callback_data="admin_chats")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="admin_refresh")]
     ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "🔧 Админ панель\n\nВыберите действие:",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("🔧 Админ панель:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопок"""
     query = update.callback_query
     await query.answer()
-    
-    # Админ функции
-    if update.effective_user.id == ADMIN_ID:
-        if query.data == "admin_stats":
-            total_chats = len(chat_data)
-            total_bots = sum(len(info["bots"]) + len(info["manual_bots"]) for info in chat_data.values())
-            
-            text = f"📊 Статистика:\n\n"
-            text += f"🔹 Всего чатов: {total_chats}\n"
-            text += f"🔹 Всего отслеживаемых ботов: {total_bots}\n"
-            text += f"🔹 Последнее обновление: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-            
-            await query.edit_message_text(text)
+    if update.effective_user.id != ADMIN_ID and not query.data.startswith(('add_bot_', 'remove_bot_', 'ignore_bot_', 'back_to_botlist')):
+        await query.edit_message_text("❌ Нет прав.")
+        return
+    data = query.data
+    if data == "admin_stats":
+        total_chats = len(chat_data)
+        total_bots = sum(len(info["bots"]) + len(info["manual_bots"]) for info in chat_data.values())
+        text = f"📊 Статистика:\n🔹 Чатов: {total_chats}\n🔹 Ботов: {total_bots}\n🔹 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        await query.edit_message_text(text)
+    elif data == "admin_chats":
+        if not chat_data:
+            await query.edit_message_text("📋 Нет чатов.")
             return
-        
-        elif query.data == "admin_chats":
-            if not chat_data:
-                await query.edit_message_text("📋 Нет активных чатов.")
-                return
-            
-            text = "📋 Активные чаты:\n\n"
-            for chat_id, info in list(chat_data.items())[:10]:
-                bots_count = len(info["bots"]) + len(info["manual_bots"])
-                text += f"🔸 Chat ID: {chat_id}\n"
-                text += f"   Ботов: {bots_count}\n\n"
-            
-            if len(chat_data) > 10:
-                text += f"... и еще {len(chat_data) - 10} чатов"
-            
-            await query.edit_message_text(text)
+        text = "📋 Чаты:\n"
+        for chat_id, info in list(chat_data.items())[:10]:
+            text += f"🔸 {chat_id}: {len(info['bots']) + len(info['manual_bots'])} ботов\n"
+        if len(chat_data) > 10:
+            text += f"... +{len(chat_data)-10}"
+        await query.edit_message_text(text)
+    elif data == "admin_refresh":
+        save_data()
+        await query.edit_message_text("🔄 Обновлено!")
+    elif data.startswith("add_bot_"):
+        chat_id = int(data.split("_")[-1])
+        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            await query.edit_message_text("❌ Только админы чата.")
             return
-        
-        elif query.data == "admin_refresh":
-            save_data()
-            await query.edit_message_text("🔄 Данные обновлены!")
+        await query.edit_message_text("➕ Ответьте на сообщение /addbot или /addbot @username")
+    elif data.startswith("remove_bot_"):
+        chat_id = int(data.split("_")[-1])
+        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            await query.edit_message_text("❌ Только админы чата.")
             return
-    
-    # Обработка кнопок управления ботами в чатах
-    if query.data.startswith("add_bot_") or query.data.startswith("remove_bot_"):
-        chat_id = int(query.data.split("_")[-1])
-        
-        # Проверяем права пользователя в чате
-        try:
-            member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-            if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                await query.edit_message_text("❌ Только администраторы чата могут управлять списком ботов.")
-                return
-        except:
-            await query.edit_message_text("❌ Ошибка проверки прав.")
+        info = chat_data.get(chat_id, {"bots": set(), "manual_bots": set(), "ignored_bots": set()})
+        all_bots = info["bots"].union(info["manual_bots"]) - info["ignored_bots"]
+        if not all_bots:
+            await query.edit_message_text("❌ Нет ботов.")
             return
-        
-        if query.data.startswith("add_bot_"):
-            await query.edit_message_text(
-                "➕ Для добавления бота в список отслеживания:\n\n"
-                "1. Ответьте на сообщение от бота командой /addbot\n"
-                "2. Или отправьте /addbot @username_бота"
-            )
-        
-        elif query.data.startswith("remove_bot_"):
-            info = chat_data.get(chat_id, {"bots": set(), "manual_bots": set(), "ignored_bots": set()})
-            all_bots = info["bots"].union(info["manual_bots"]) - info["ignored_bots"]
-            
-            if not all_bots:
-                await query.edit_message_text("❌ Нет ботов для удаления.")
-                return
-            
-            keyboard = []
-            for bot_id in list(all_bots)[:10]:  # Показываем первые 10
-                try:
-                    bot_info = await context.bot.get_chat(bot_id)
-                    bot_name = bot_info.username or bot_info.first_name or str(bot_id)
-                except:
-                    bot_name = str(bot_id)
-                
-                keyboard.append([InlineKeyboardButton(
-                    f"❌ {bot_name[:20]}...", 
-                    callback_data=f"ignore_bot_{chat_id}_{bot_id}"
-                )])
-            
-            keyboard.append([InlineKeyboardButton("« Назад", callback_data="back_to_botlist")])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                "Выберите бота для исключения из отслеживания:",
-                reply_markup=reply_markup
-            )
-    
-    elif query.data.startswith("ignore_bot_"):
-        parts = query.data.split("_")
+        keyboard = []
+        for bot_id in list(all_bots)[:10]:
+            bot_info = await context.bot.get_chat(bot_id)
+            name = bot_info.username or bot_info.first_name or str(bot_id)
+            keyboard.append([InlineKeyboardButton(f"❌ {name[:20]}...", callback_data=f"ignore_bot_{chat_id}_{bot_id}")])
+        keyboard.append([InlineKeyboardButton("« Назад", callback_data=f"back_to_botlist_{chat_id}")])
+        await query.edit_message_text("Выберите для исключения:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data.startswith("ignore_bot_"):
+        parts = data.split("_")
         chat_id = int(parts[2])
         bot_id = int(parts[3])
-        
-        if chat_id not in chat_data:
-            chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
-        
-        chat_data[chat_id]["ignored_bots"].add(bot_id)
-        save_data()
-        
-        await query.edit_message_text(f"✅ Бот {bot_id} исключен из отслеживания.")
+        if chat_id in chat_data:
+            chat_data[chat_id]["ignored_bots"].add(bot_id)
+            chat_data[chat_id]["bots"].discard(bot_id)
+            chat_data[chat_id]["manual_bots"].discard(bot_id)
+            save_data()
+        await query.edit_message_text(f"✅ Бот {bot_id} исключён.")
+    elif data.startswith("back_to_botlist_"):
+        chat_id = int(data.split("_")[-1])
+        info = chat_data.get(chat_id, {"bots": set(), "manual_bots": set(), "ignored_bots": set()})
+        all_bots = info["bots"].union(info["manual_bots"]) - info["ignored_bots"]
+        if not all_bots:
+            text = "🤖 Нет ботов."
+        else:
+            text = "🤖 Отслеживаемые боты:\n"
+            for i, bot_id in enumerate(all_bots, 1):
+                bot_info = await context.bot.get_chat(bot_id)
+                name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name
+                text += f"{i}. {name} ({bot_id})\n"
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить", callback_data=f"add_bot_{chat_id}")],
+            [InlineKeyboardButton("➖ Исключить", callback_data=f"remove_bot_{chat_id}")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def botlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /botlist - показывает список ботов в чате"""
     chat_id = update.effective_chat.id
-    
     if chat_id not in chat_data:
-        await update.message.reply_text("🤖 В этом чате пока нет отслеживаемых ботов.")
+        await update.message.reply_text("🤖 Нет ботов.")
         return
-    
     info = chat_data[chat_id]
     all_bots = info["bots"].union(info["manual_bots"]) - info["ignored_bots"]
-    
     if not all_bots:
-        await update.message.reply_text("🤖 В этом чате нет активных ботов для отслеживания.")
+        await update.message.reply_text("🤖 Нет ботов.")
         return
-    
-    text = "🤖 Отслеживаемые боты в этом чате:\n\n"
+    text = "🤖 Отслеживаемые боты:\n"
     for i, bot_id in enumerate(all_bots, 1):
-        try:
-            bot_info = await context.bot.get_chat(bot_id)
-            bot_name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name
-        except:
-            bot_name = str(bot_id)
-        
-        text += f"{i}. {bot_name} (ID: {bot_id})\n"
-    
-    # Кнопки для управления (только для админов чата)
-    try:
-        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-        if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            keyboard = [
-                [InlineKeyboardButton("➕ Добавить бота", callback_data=f"add_bot_{chat_id}")],
-                [InlineKeyboardButton("➖ Исключить бота", callback_data=f"remove_bot_{chat_id}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(text, reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(text)
-    except:
+        bot_info = await context.bot.get_chat(bot_id)
+        name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name
+        text += f"{i}. {name} ({bot_id})\n"
+    member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+    if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить", callback_data=f"add_bot_{chat_id}")],
+            [InlineKeyboardButton("➖ Исключить", callback_data=f"remove_bot_{chat_id}")]
+        ]
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
         await update.message.reply_text(text)
 
 async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для ручного добавления бота в отслеживание"""
     chat_id = update.effective_chat.id
-    
-    # Проверяем права пользователя
-    try:
-        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            await update.message.reply_text("❌ Только администраторы могут добавлять ботов.")
-            return
-    except:
-        await update.message.reply_text("❌ Ошибка проверки прав.")
+    member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("❌ Только админы.")
         return
-    
     if chat_id not in chat_data:
         chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
-    
-    # Если команда - ответ на сообщение
     if update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-        if is_bot_by_username(target_user) or target_user.is_bot:
-            chat_data[chat_id]["manual_bots"].add(target_user.id)
-            save_data()
-            
-            username = f"@{target_user.username}" if target_user.username else target_user.first_name
-            await update.message.reply_text(f"✅ Бот {username} добавлен в отслеживание.")
-        else:
-            await update.message.reply_text("❌ Это не бот.")
+        reply_msg = update.message.reply_to_message
+        target_id = reply_msg.from_user.id if reply_msg.from_user else reply_msg.sender_chat.id if reply_msg.sender_chat else None
+        if target_id is None:
+            await update.message.reply_text("❌ Не удалось определить отправителя.")
+            return
+        chat_data[chat_id]["manual_bots"].add(target_id)
+        chat_data[chat_id]["ignored_bots"].discard(target_id)  # Удаляем из игнора, если был
+        save_data()
+        name = reply_msg.from_user.username if reply_msg.from_user and reply_msg.from_user.username else reply_msg.sender_chat.username if reply_msg.sender_chat else "Неизвестный"
+        await update.message.reply_text(f"✅ @{name} добавлен в отслеживание.")
         return
-    
-    # Если указан username
     if context.args:
-        username = context.args[0].replace("@", "")
-        try:
-            # Ищем пользователя по username (упрощенный способ)
-            await update.message.reply_text(
-                f"🔍 Для добавления @{username} в отслеживание, попросите его написать в чат, "
-                f"затем ответьте на его сообщение командой /addbot"
-            )
-        except:
-            await update.message.reply_text("❌ Не удалось найти пользователя.")
+        await update.message.reply_text("🔍 Для добавления @username попросите написать в чат, затем reply /addbot")
     else:
-        await update.message.reply_text(
-            "Использование:\n"
-            "• Ответьте на сообщение бота: /addbot\n"
-            "• Или укажите username: /addbot @username"
-        )
+        await update.message.reply_text("Использование:\n• Reply на сообщение: /addbot\n• /addbot @username (reply надёжнее)")
+
+async def removebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("❌ Только админы.")
+        return
+    if chat_id not in chat_data:
+        await update.message.reply_text("❌ Нет данных о чате.")
+        return
+    if update.message.reply_to_message:
+        reply_msg = update.message.reply_to_message
+        target_id = reply_msg.from_user.id if reply_msg.from_user else reply_msg.sender_chat.id if reply_msg.sender_chat else None
+        if target_id is None:
+            await update.message.reply_text("❌ Не удалось определить отправителя.")
+            return
+        if target_id not in chat_data[chat_id]["bots"] and target_id not in chat_data[chat_id]["manual_bots"]:
+            await update.message.reply_text("❌ Не в списке отслеживания.")
+            return
+        chat_data[chat_id]["ignored_bots"].add(target_id)
+        chat_data[chat_id]["bots"].discard(target_id)
+        chat_data[chat_id]["manual_bots"].discard(target_id)
+        save_data()
+        name = reply_msg.from_user.username if reply_msg.from_user and reply_msg.from_user.username else reply_msg.sender_chat.username if reply_msg.sender_chat else "Неизвестный"
+        await update.message.reply_text(f"✅ @{name} исключён из отслеживания.")
+        return
+    if context.args:
+        await update.message.reply_text("🔍 Для исключения @username reply на сообщение /removebot")
+    else:
+        await update.message.reply_text("Использование:\n• Reply на сообщение: /removebot\n• /removebot @username (reply надёжнее)")
+
+async def refreshbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("❌ Только админы.")
+        return
+    if chat_id not in chat_data:
+        await update.message.reply_text("❌ Нет данных о чате.")
+        return
+    chat_data[chat_id]["bots"] = set()  # Очистка авто-обнаруженных
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            user = admin.user
+            if (user.is_bot or is_bot_by_username(user.username)) and user.id != context.bot.id:
+                chat_data[chat_id]["bots"].add(user.id)
+    except Exception as e:
+        logger.warning(f"Не удалось сканировать админов: {e}")
+    save_data()
+    await update.message.reply_text("✅ Список обновлён. Боты среди админов добавлены. Новые — при сообщениях.")
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка добавления бота в чат"""
     message = update.message
     chat_id = message.chat.id
-    
-    # Проверяем, добавлен ли наш бот
     for member in message.new_chat_members:
         if member.id == context.bot.id:
-            # Наш бот добавлен в чат
             if chat_id not in chat_data:
-                chat_data[chat_id] = {
-                    "bots": set(),
-                    "manual_bots": set(),
-                    "ignored_bots": set()
-                }
+                chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
                 save_data()
-            
-            welcome_text = (
-                "🤖 Привет! Я бот для модерации рекламных сообщений от других ботов.\n\n"
-                "⚠️ Для корректной работы мне нужны права администратора:\n"
-                "• Удаление сообщений\n\n"
-                "📋 Команды:\n"
-                "• /botlist - список отслеживаемых ботов\n"
-                "• /addbot - добавить бота в отслеживание\n\n"
-                "🎯 Я автоматически определяю ботов по их username (должен содержать 'bot')"
+            await message.reply_text(
+                "🤖 Привет! Я модерирую рекламу от ботов.\n\n⚠️ Дайте админ-права на удаление.\n\nКоманды:\n/botlist\n/addbot\n/removebot\n/refreshbot\n\nОбнаруживаю по username ends with 'bot'."
             )
-            
-            await message.reply_text(welcome_text)
+            # Сканируем админов при добавлении
+            try:
+                admins = await context.bot.get_chat_administrators(chat_id)
+                for admin in admins:
+                    user = admin.user
+                    if (user.is_bot or is_bot_by_username(user.username)) and user.id != context.bot.id:
+                        chat_data[chat_id]["bots"].add(user.id)
+                save_data()
+            except:
+                pass
             break
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Основной обработчик сообщений"""
     message = update.message
-    if not message or not message.text:
+    if not message:
         return
-    
     chat_id = message.chat.id
-    user = message.from_user
-    
-    # Пропускаем сообщения от нашего бота
-    if user.id == context.bot.id:
+    from_user = message.from_user
+    sender_chat = message.sender_chat
+    target_id = from_user.id if from_user else sender_chat.id if sender_chat else None
+    if target_id == context.bot.id or target_id is None:
         return
-    
-    # Инициализируем данные чата если их нет
     if chat_id not in chat_data:
-        chat_data[chat_id] = {
-            "bots": set(),
-            "manual_bots": set(),
-            "ignored_bots": set()
-        }
-    
-    # Проверяем, является ли отправитель ботом
-    is_bot = user.is_bot or is_bot_by_username(user)
-    
-    if is_bot and user.id != context.bot.id:
-        # Добавляем бота в список если его там нет
-        chat_data[chat_id]["bots"].add(user.id)
+        chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
+    # Детекция бота
+    is_bot = False
+    username = ""
+    if from_user:
+        is_bot = from_user.is_bot or is_bot_by_username(from_user.username)
+        username = from_user.username or from_user.first_name
+    elif sender_chat:
+        is_bot = is_bot_by_username(sender_chat.username)
+        username = sender_chat.username
+    if is_bot:
+        chat_data[chat_id]["bots"].add(target_id)
         save_data()
-        
-        # Проверяем, не в списке ли игнорируемых
-        if user.id in chat_data[chat_id]["ignored_bots"]:
-            return
-        
-        # Проверяем сообщение на рекламу
+    if target_id in chat_data[chat_id]["ignored_bots"]:
+        return
+    all_tracked = chat_data[chat_id]["bots"].union(chat_data[chat_id]["manual_bots"])
+    if target_id not in all_tracked:
+        return
+    # Проверка на спам (text или caption)
+    text = message.text or message.caption or ""
+    if await is_spam_message(text):
         try:
-            is_spam = is_spam_message(message.text)
-            if is_spam:
-                # Проверяем права бота на удаление
-                bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-                if (bot_member.status == ChatMemberStatus.ADMINISTRATOR and 
-                    hasattr(bot_member, 'can_delete_messages') and 
-                    bot_member.can_delete_messages):
-                    
-                    await message.delete()
-                    
-                    username = f"@{user.username}" if user.username else user.first_name
-                    logger.info(f"Удалено рекламное сообщение от {username} ({user.id}) в чате {chat_id}")
-                    
-                    # Отправляем короткое уведомление
-                    notification = await context.bot.send_message(
-                        chat_id,
-                        f"🚫 Удалена реклама от {username}"
-                    )
-                    
-                    # Удаляем уведомление через 5 секунд
-                    await asyncio.sleep(5)
-                    try:
-                        await notification.delete()
-                    except:
-                        pass
-                        
-                else:
-                    logger.warning(f"Нет прав для удаления сообщения в чате {chat_id}")
+            bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+            if bot_member.status == ChatMemberStatus.ADMINISTRATOR and bot_member.can_delete_messages:
+                await message.delete()
+                logger.info(f"Удалено от {username} ({target_id}) в {chat_id}")
+                notification = await context.bot.send_message(chat_id, f"🚫 Удалена реклама от @{username}")
+                await asyncio.sleep(5)
+                await notification.delete()
+            else:
+                logger.warning(f"Нет прав в {chat_id}")
         except Exception as e:
-            logger.error(f"Ошибка при проверке сообщения: {e}")
+            logger.error(f"Ошибка: {e}")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда статистики (только для админа)"""
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ У вас нет прав для использования этой команды.")
+        await update.message.reply_text("❌ Нет прав.")
         return
-    
     total_chats = len(chat_data)
     total_bots = sum(len(info["bots"]) + len(info["manual_bots"]) for info in chat_data.values())
-    
-    text = f"📊 Статистика бота:\n\n"
-    text += f"🔹 Активных чатов: {total_chats}\n"
-    text += f"🔹 Отслеживаемых ботов: {total_bots}\n"
-    text += f"🔹 Время работы: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-    
-    if chat_data:
-        text += "📋 Топ-5 чатов по количеству ботов:\n"
-        sorted_chats = sorted(
-            chat_data.items(),
-            key=lambda x: len(x[1]["bots"]) + len(x[1]["manual_bots"]),
-            reverse=True
-        )[:5]
-        
-        for i, (chat_id, info) in enumerate(sorted_chats, 1):
-            bots_count = len(info["bots"]) + len(info["manual_bots"])
-            text += f"{i}. Chat {chat_id}: {bots_count} ботов\n"
-    
+    text = f"📊 Статистика:\n🔹 Чатов: {total_chats}\n🔹 Ботов: {total_bots}\n🔹 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\nТоп-5 чатов:\n"
+    sorted_chats = sorted(chat_data.items(), key=lambda x: len(x[1]["bots"]) + len(x[1]["manual_bots"]), reverse=True)[:5]
+    for i, (cid, info) in enumerate(sorted_chats, 1):
+        text += f"{i}. {cid}: {len(info['bots']) + len(info['manual_bots'])} ботов\n"
     await update.message.reply_text(text)
 
 def main():
-    """Запуск бота"""
-    # Загружаем данные
     load_data()
-    
-    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("botlist", botlist_command))
     application.add_handler(CommandHandler("addbot", addbot_command))
+    application.add_handler(CommandHandler("removebot", removebot_command))
+    application.add_handler(CommandHandler("refreshbot", refreshbot_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Запускаем бота
-    print("🤖 Бот запущен! (Полностью бесплатное решение)")
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    print("🤖 Бот запущен! (Бесплатно 24/7)")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
