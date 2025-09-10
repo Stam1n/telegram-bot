@@ -9,20 +9,16 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ChatMemberStatus
+from telegram.error import BadRequest
 
 # Настройки
 ADMIN_ID = 946695591
-BOT_TOKEN = os.getenv('BOT_TOKEN')  # Возьми из Railway Variables
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Глобальные переменные
-chat_data = {}  # {chat_id: {"bots": set(), "manual_bots": set(), "ignored_bots": set()}}
+chat_data = {}
 DATA_FILE = "bot_data.json"
 
 def load_data():
@@ -38,7 +34,7 @@ def load_data():
                         "ignored_bots": set(info.get("ignored_bots", []))
                     }
     except Exception as e:
-        logger.error(f"Ошибка загрузки данных: {e}")
+        logger.error(f"Ошибка загрузки: {e}")
         chat_data = {}
 
 def save_data():
@@ -53,7 +49,7 @@ def save_data():
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"Ошибка сохранения данных: {e}")
+        logger.error(f"Ошибка сохранения: {e}")
 
 def is_bot_by_username(username: str):
     if not username:
@@ -141,7 +137,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
             await query.edit_message_text("❌ Только админы чата.")
             return
-        await query.edit_message_text("➕ Ответьте на сообщение /addbot или /addbot @username")
+        await query.edit_message_text("➕ Ответьте на сообщение /addbot или /addbot @username/ID")
     elif data.startswith("remove_bot_"):
         chat_id = int(data.split("_")[-1])
         member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
@@ -155,8 +151,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = []
         for bot_id in list(all_bots)[:10]:
-            bot_info = await context.bot.get_chat(bot_id)
-            name = bot_info.username or bot_info.first_name or str(bot_id)
+            try:
+                bot_info = await context.bot.get_chat(bot_id)
+                name = bot_info.username or bot_info.first_name or str(bot_id)
+                if bot_id < 0:
+                    name = f"Channel: {name}"
+            except:
+                name = str(bot_id)
             keyboard.append([InlineKeyboardButton(f"❌ {name[:20]}...", callback_data=f"ignore_bot_{chat_id}_{bot_id}")])
         keyboard.append([InlineKeyboardButton("« Назад", callback_data=f"back_to_botlist_{chat_id}")])
         await query.edit_message_text("Выберите для исключения:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -179,8 +180,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "🤖 Отслеживаемые боты:\n"
             for i, bot_id in enumerate(all_bots, 1):
-                bot_info = await context.bot.get_chat(bot_id)
-                name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name
+                try:
+                    bot_info = await context.bot.get_chat(bot_id)
+                    name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name or str(bot_id)
+                    if bot_id < 0:
+                        name = f"Channel: {name}"
+                except:
+                    name = str(bot_id)
                 text += f"{i}. {name} ({bot_id})\n"
         keyboard = [
             [InlineKeyboardButton("➕ Добавить", callback_data=f"add_bot_{chat_id}")],
@@ -200,8 +206,13 @@ async def botlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = "🤖 Отслеживаемые боты:\n"
     for i, bot_id in enumerate(all_bots, 1):
-        bot_info = await context.bot.get_chat(bot_id)
-        name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name
+        try:
+            bot_info = await context.bot.get_chat(bot_id)
+            name = f"@{bot_info.username}" if bot_info.username else bot_info.first_name or str(bot_id)
+            if bot_id < 0:
+                name = f"Channel: {name}"
+        except:
+            name = str(bot_id)
         text += f"{i}. {name} ({bot_id})\n"
     member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
     if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
@@ -221,22 +232,63 @@ async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat_id not in chat_data:
         chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
+    added = []
+    errors = []
     if update.message.reply_to_message:
         reply_msg = update.message.reply_to_message
-        target_id = reply_msg.from_user.id if reply_msg.from_user else reply_msg.sender_chat.id if reply_msg.sender_chat else None
-        if target_id is None:
-            await update.message.reply_text("❌ Не удалось определить отправителя.")
-            return
-        chat_data[chat_id]["manual_bots"].add(target_id)
-        chat_data[chat_id]["ignored_bots"].discard(target_id)  # Удаляем из игнора, если был
-        save_data()
-        name = reply_msg.from_user.username if reply_msg.from_user and reply_msg.from_user.username else reply_msg.sender_chat.username if reply_msg.sender_chat else "Неизвестный"
-        await update.message.reply_text(f"✅ @{name} добавлен в отслеживание.")
-        return
-    if context.args:
-        await update.message.reply_text("🔍 Для добавления @username попросите написать в чат, затем reply /addbot")
+        target_id = None
+        name = "Неизвестный"
+        if reply_msg.from_user:
+            target_id = reply_msg.from_user.id
+            name = f"@{reply_msg.from_user.username}" if reply_msg.from_user.username else reply_msg.from_user.first_name
+        elif reply_msg.sender_chat:
+            target_id = reply_msg.sender_chat.id
+            name = f"Channel @{reply_msg.sender_chat.username}" if reply_msg.sender_chat.username else str(target_id)
+        elif reply_msg.forward_from:
+            target_id = reply_msg.forward_from.id
+            name = f"@{reply_msg.forward_from.username}" if reply_msg.forward_from.username else reply_msg.forward_from.first_name
+        elif reply_msg.forward_sender_name:
+            name = reply_msg.forward_sender_name
+            errors.append(f"❌ {name}: Скрытый отправитель, используй ID.")
+        if target_id:
+            chat_data[chat_id]["manual_bots"].add(target_id)
+            chat_data[chat_id]["ignored_bots"].discard(target_id)
+            added.append(name)
+        else:
+            logger.info(f"addbot: target_id None for reply in {chat_id}")
+            errors.append("❌ Тип сообщения не поддерживается, используй ID или @username.")
+    elif context.args:
+        for arg in context.args:
+            target_id = None
+            name = arg
+            if arg.startswith('@'):
+                try:
+                    chat = await context.bot.get_chat(arg)
+                    target_id = chat.id
+                    name = f"@{chat.username}" if chat.username else chat.first_name or str(target_id)
+                    if target_id < 0:
+                        name = f"Channel {name}"
+                except BadRequest as e:
+                    errors.append(f"❌ {arg}: Не найден ({e.message}).")
+            elif arg.lstrip('-').isdigit():  # Allow negative for channels
+                target_id = int(arg)
+            else:
+                errors.append(f"❌ {arg}: Неверный формат (ID или @username).")
+            if target_id:
+                chat_data[chat_id]["manual_bots"].add(target_id)
+                chat_data[chat_id]["ignored_bots"].discard(target_id)
+                added.append(name)
     else:
-        await update.message.reply_text("Использование:\n• Reply на сообщение: /addbot\n• /addbot @username (reply надёжнее)")
+        await update.message.reply_text("Использование:\n• Reply: /addbot\n• /addbot @username/ID [другие...]")
+        return
+    if added or errors:
+        save_data()
+        text = ""
+        if added:
+            text += "✅ Добавлены: " + ", ".join(added) + "\n"
+        if errors:
+            text += "\n".join(errors)
+        await update.message.reply_text(text)
 
 async def removebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -245,28 +297,73 @@ async def removebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Только админы.")
         return
     if chat_id not in chat_data:
-        await update.message.reply_text("❌ Нет данных о чате.")
+        await update.message.reply_text("❌ Нет данных.")
         return
+    removed = []
+    errors = []
     if update.message.reply_to_message:
         reply_msg = update.message.reply_to_message
-        target_id = reply_msg.from_user.id if reply_msg.from_user else reply_msg.sender_chat.id if reply_msg.sender_chat else None
-        if target_id is None:
-            await update.message.reply_text("❌ Не удалось определить отправителя.")
-            return
-        if target_id not in chat_data[chat_id]["bots"] and target_id not in chat_data[chat_id]["manual_bots"]:
-            await update.message.reply_text("❌ Не в списке отслеживания.")
-            return
-        chat_data[chat_id]["ignored_bots"].add(target_id)
-        chat_data[chat_id]["bots"].discard(target_id)
-        chat_data[chat_id]["manual_bots"].discard(target_id)
-        save_data()
-        name = reply_msg.from_user.username if reply_msg.from_user and reply_msg.from_user.username else reply_msg.sender_chat.username if reply_msg.sender_chat else "Неизвестный"
-        await update.message.reply_text(f"✅ @{name} исключён из отслеживания.")
-        return
-    if context.args:
-        await update.message.reply_text("🔍 Для исключения @username reply на сообщение /removebot")
+        target_id = None
+        name = "Неизвестный"
+        if reply_msg.from_user:
+            target_id = reply_msg.from_user.id
+            name = f"@{reply_msg.from_user.username}" if reply_msg.from_user.username else reply_msg.from_user.first_name
+        elif reply_msg.sender_chat:
+            target_id = reply_msg.sender_chat.id
+            name = f"Channel @{reply_msg.sender_chat.username}" if reply_msg.sender_chat.username else str(target_id)
+        elif reply_msg.forward_from:
+            target_id = reply_msg.forward_from.id
+            name = f"@{reply_msg.forward_from.username}" if reply_msg.forward_from.username else reply_msg.forward_from.first_name
+        elif reply_msg.forward_sender_name:
+            name = reply_msg.forward_sender_name
+            errors.append(f"❌ {name}: Скрытый, используй ID.")
+        if target_id:
+            if target_id not in chat_data[chat_id]["bots"] and target_id not in chat_data[chat_id]["manual_bots"]:
+                errors.append(f"❌ {name}: Не в списке.")
+            else:
+                chat_data[chat_id]["ignored_bots"].add(target_id)
+                chat_data[chat_id]["bots"].discard(target_id)
+                chat_data[chat_id]["manual_bots"].discard(target_id)
+                removed.append(name)
+        else:
+            logger.info(f"removebot: target_id None for reply in {chat_id}")
+            errors.append("❌ Тип не поддерживается, используй ID или @username.")
+    elif context.args:
+        for arg in context.args:
+            target_id = None
+            name = arg
+            if arg.startswith('@'):
+                try:
+                    chat = await context.bot.get_chat(arg)
+                    target_id = chat.id
+                    name = f"@{chat.username}" if chat.username else chat.first_name or str(target_id)
+                    if target_id < 0:
+                        name = f"Channel {name}"
+                except BadRequest as e:
+                    errors.append(f"❌ {arg}: Не найден ({e.message}).")
+            elif arg.lstrip('-').isdigit():
+                target_id = int(arg)
+            else:
+                errors.append(f"❌ {arg}: Неверный формат.")
+            if target_id:
+                if target_id not in chat_data[chat_id]["bots"] and target_id not in chat_data[chat_id]["manual_bots"]:
+                    errors.append(f"❌ {name}: Не в списке.")
+                else:
+                    chat_data[chat_id]["ignored_bots"].add(target_id)
+                    chat_data[chat_id]["bots"].discard(target_id)
+                    chat_data[chat_id]["manual_bots"].discard(target_id)
+                    removed.append(name)
     else:
-        await update.message.reply_text("Использование:\n• Reply на сообщение: /removebot\n• /removebot @username (reply надёжнее)")
+        await update.message.reply_text("Использование:\n• Reply: /removebot\n• /removebot @username/ID [другие...]")
+        return
+    if removed or errors:
+        save_data()
+        text = ""
+        if removed:
+            text += "✅ Исключены: " + ", ".join(removed) + "\n"
+        if errors:
+            text += "\n".join(errors)
+        await update.message.reply_text(text)
 
 async def refreshbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -275,9 +372,9 @@ async def refreshbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Только админы.")
         return
     if chat_id not in chat_data:
-        await update.message.reply_text("❌ Нет данных о чате.")
+        await update.message.reply_text("❌ Нет данных.")
         return
-    chat_data[chat_id]["bots"] = set()  # Очистка авто-обнаруженных
+    chat_data[chat_id]["bots"] = set()
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
         for admin in admins:
@@ -285,7 +382,7 @@ async def refreshbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if (user.is_bot or is_bot_by_username(user.username)) and user.id != context.bot.id:
                 chat_data[chat_id]["bots"].add(user.id)
     except Exception as e:
-        logger.warning(f"Не удалось сканировать админов: {e}")
+        logger.warning(f"Скан админов ошибка: {e}")
     save_data()
     await update.message.reply_text("✅ Список обновлён. Боты среди админов добавлены. Новые — при сообщениях.")
 
@@ -300,7 +397,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 "🤖 Привет! Я модерирую рекламу от ботов.\n\n⚠️ Дайте админ-права на удаление.\n\nКоманды:\n/botlist\n/addbot\n/removebot\n/refreshbot\n\nОбнаруживаю по username ends with 'bot'."
             )
-            # Сканируем админов при добавлении
             try:
                 admins = await context.bot.get_chat_administrators(chat_id)
                 for admin in admins:
@@ -324,7 +420,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat_id not in chat_data:
         chat_data[chat_id] = {"bots": set(), "manual_bots": set(), "ignored_bots": set()}
-    # Детекция бота
     is_bot = False
     username = ""
     if from_user:
@@ -341,7 +436,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_tracked = chat_data[chat_id]["bots"].union(chat_data[chat_id]["manual_bots"])
     if target_id not in all_tracked:
         return
-    # Проверка на спам (text или caption)
     text = message.text or message.caption or ""
     if await is_spam_message(text):
         try:
